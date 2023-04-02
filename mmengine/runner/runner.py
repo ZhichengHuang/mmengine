@@ -34,7 +34,8 @@ from mmengine.optim import (OptimWrapper, OptimWrapperDict, _ParamScheduler,
 from mmengine.registry import (DATA_SAMPLERS, DATASETS, EVALUATOR, FUNCTIONS,
                                HOOKS, LOG_PROCESSORS, LOOPS, MODEL_WRAPPERS,
                                MODELS, OPTIM_WRAPPERS, PARAM_SCHEDULERS,
-                               RUNNERS, VISUALIZERS, DefaultScope)
+                               RUNNERS, VISUALIZERS, STRATEGIES, DefaultScope)
+from mmengine.strategy import Mode, Strategy
 from mmengine.utils import digit_version, get_git_hash, is_seq_of
 from mmengine.utils.dl_utils import (TORCH_VERSION, collect_env,
                                      set_multi_processing)
@@ -261,6 +262,7 @@ class Runner:
         load_from: Optional[str] = None,
         resume: bool = False,
         launcher: str = 'none',
+        strategy: Union[str, Dict, None] = None,
         env_cfg: Dict = dict(dist_cfg=dict(backend='nccl')),
         log_processor: Optional[Dict] = None,
         log_level: str = 'INFO',
@@ -347,6 +349,22 @@ class Runner:
         else:
             self._distributed = True
 
+        # build strategy
+        if self.distributed:
+            default_strategy = 'DDPStrategy'
+        else:
+            default_strategy = 'NativeStrategy'
+
+        if strategy is None:
+            strategy = default_strategy
+        strategy_cfg = dict()
+        if isinstance(strategy, str):
+            strategy_cfg['type'] = strategy
+        elif isinstance(strategy, dict):
+            strategy_cfg = copy.deepcopy(strategy)
+            strategy_cfg.setdefault('type', default_strategy)
+        self.strategy: Strategy = STRATEGIES.build(strategy_cfg)
+
         # self._timestamp will be set in the `setup_env` method. Besides,
         # it also will initialize multi-process and (or) distributed
         # environment.
@@ -375,6 +393,7 @@ class Runner:
         # Since `get_instance` could return any subclass of ManagerMixin. The
         # corresponding attribute needs a type hint.
         self.logger = self.build_logger(log_level=log_level)
+        self.strategy.logger = self.logger
 
         # Collect and log environment information.
         self._log_env(env_cfg)
@@ -404,15 +423,8 @@ class Runner:
             # Merge the data_preprocessor to model config.
             model.setdefault('data_preprocessor', data_preprocessor)
         self.model = self.build_model(model)
-        # wrap model
-        self.model = self.wrap_model(
-            self.cfg.get('model_wrapper_cfg'), self.model)
 
-        # get model name from the model class
-        if hasattr(self.model, 'module'):
-            self._model_name = self.model.module.__class__.__name__
-        else:
-            self._model_name = self.model.__class__.__name__
+        self._model_name = self.model.__class__.__name__
 
         self._hooks: List[Hook] = []
         # register hooks to `self._hooks`
@@ -463,6 +475,7 @@ class Runner:
             default_scope=cfg.get('default_scope', 'mmengine'),
             randomness=cfg.get('randomness', dict(seed=None)),
             experiment_name=cfg.get('experiment_name'),
+            strategy=cfg.get('strategy'),
             cfg=cfg,
         )
 
@@ -649,7 +662,8 @@ class Runner:
         # init distributed env first, since logger depends on the dist info.
         if self.distributed and not is_distributed():
             dist_cfg: dict = env_cfg.get('dist_cfg', {})
-            init_dist(self.launcher, **dist_cfg)
+            # init_dist(self.launcher, **dist_cfg)
+            self.strategy.setup_distributed(self.launcher, **dist_cfg)
 
         self._rank, self._world_size = get_dist_info()
 
@@ -1625,23 +1639,38 @@ class Runner:
         if self._has_loaded:
             return None
 
-        # decide to load from checkpoint or resume from checkpoint
-        resume_from = None
-        if self._resume and self._load_from is None:
-            # auto resume from the latest checkpoint
-            resume_from = find_latest_checkpoint(self.work_dir)
-            self.logger.info(
-                f'Auto resumed from the latest checkpoint {resume_from}.')
-        elif self._resume and self._load_from is not None:
-            # resume from the specified checkpoint
-            resume_from = self._load_from
+        # # decide to load from checkpoint or resume from checkpoint
+        # resume_from = None
+        # if self._resume and self._load_from is None:
+        #     # auto resume from the latest checkpoint
+        #     resume_from = find_latest_checkpoint(self.work_dir)
+        #     self.logger.info(
+        #         f'Auto resumed from the latest checkpoint {resume_from}.')
+        # elif self._resume and self._load_from is not None:
+        #     # resume from the specified checkpoint
+        #     resume_from = self._load_from
+        #
+        # if resume_from is not None:
+        #     self.resume(resume_from)
+        #     self._has_loaded = True
+        # elif self._load_from is not None:
+        #     self.load_checkpoint(self._load_from)
+        #     self._has_loaded = True
+        # to be compatible with existing code
+        map_location = get_device() if self._resume else "cpu"
 
-        if resume_from is not None:
-            self.resume(resume_from)
-            self._has_loaded = True
-        elif self._load_from is not None:
-            self.load_checkpoint(self._load_from)
-            self._has_loaded = True
+        #after_loca_checkpoint as a callback function
+        def hook_callback(ckpt):
+            return self.call_hook('after_load_checkpoint', checkpoint=ckpt)
+
+        self.strategy.load_checkpoint(
+            self.work_dir,
+            self._load_from,
+            load_optimizer=self._resume,
+            load_param_scheduler=self._resume,
+            map_location=map_location,
+            callback=hook_callback)
+        self._has_loaded = True
 
     def train(self) -> nn.Module:
         """Launch training.
@@ -1649,18 +1678,25 @@ class Runner:
         Returns:
             nn.Module: The model after training.
         """
-        if is_model_wrapper(self.model):
-            ori_model = self.model.module
-        else:
-            ori_model = self.model
-        assert hasattr(ori_model, 'train_step'), (
+        # if is_model_wrapper(self.model):
+        #     ori_model = self.model.module
+        # else:
+        #     ori_model = self.model
+        assert hasattr(self.model, 'train_step'), (
             'If you want to train your model, please make sure your model '
             'has implemented `train_step`.')
 
         if self._val_loop is not None:
-            assert hasattr(ori_model, 'val_step'), (
+            assert hasattr(self.model, 'val_step'), (
                 'If you want to validate your model, please make sure your '
                 'model has implemented `val_step`.')
+
+        # Prepare model before strategy setup
+        if hasattr(self.model, 'init_weights'):
+            self.model.init_weights()
+        assert isinstance(self._resume, bool)
+        if not self._resume and self._load_from is not None:
+            self.load_pretrained(self._load_from)
 
         if self._train_loop is None:
             raise RuntimeError(
@@ -1672,26 +1708,49 @@ class Runner:
         self._train_loop = self.build_train_loop(
             self._train_loop)  # type: ignore
 
-        # `build_optimizer` should be called before `build_param_scheduler`
-        #  because the latter depends on the former
-        self.optim_wrapper = self.build_optim_wrapper(self.optim_wrapper)
-        # Automatically scaling lr by linear scaling rule
-        self.scale_lr(self.optim_wrapper, self.auto_scale_lr)
+        # strategy has no access to dataloder/loops, so put it here
+        if self.auto_scale_lr is not None:
+            dataloader = self._train_dataloader
+            bs = dataloader.batch_size if isinstance(
+                dataloader, DataLoader) else dataloader['batch_size']
+            real_bs = self.world_size * bs
+            self.auto_scale_lr.setdefault('real_bs', real_bs)
 
-        if self.param_schedulers is not None:
-            self.param_schedulers = self.build_param_scheduler(  # type: ignore
-                self.param_schedulers)  # type: ignore
+        if isinstance(self.train_dataloader, DataLoader):
+            epoch_length = len(self.train_dataloader)
+        else:
+            epoch_length = None
+
+        # Strategy has no access to dataloader/loops, so put it here.
+        # Refer to PR #361
+        if self.auto_scale_lr is not None:
+            dataloader = self._train_dataloader
+            bs = dataloader.batch_size if isinstance(
+                dataloader, DataLoader) else dataloader['batch_size']
+            real_bs = self.world_size * bs
+            self.auto_scale_lr.setdefault('real_bs', real_bs)
+
+        # setup model, optimizer, param_schedulers
+        (self.model, self.optim_wrapper, self.param_schedulers,
+         *_) = self.strategy.setup(
+            self.model,
+            self.optim_wrapper,
+            self.param_schedulers,
+            mode=Mode.TRAIN,
+            cfg=self.cfg,
+            max_epochs=self.max_epochs,
+            epoch_length=epoch_length,
+            max_iters=self.max_iters,
+            auto_scale_lr=self.auto_scale_lr)
+
+        if self._resume:
+            self.resume(self._load_from)
 
         if self._val_loop is not None:
             self._val_loop = self.build_val_loop(
                 self._val_loop)  # type: ignore
         # TODO: add a contextmanager to avoid calling `before_run` many times
         self.call_hook('before_run')
-
-        # initialize the model weights
-        self._init_model_weights()
-        # make sure checkpoint-related hooks are triggered after `before_run`
-        self.load_or_resume()
 
         # Initiate inner count of `optim_wrapper`.
         self.optim_wrapper.initialize_count_status(
@@ -1713,6 +1772,15 @@ class Runner:
         Returns:
             dict: A dict of metrics on validation set.
         """
+        assert isinstance(self._resume, bool)
+        if not self._resume and self._load_from is not None:
+            # When resume=False and load_from given, it means load
+            # pretrain model for train/val/test
+            self.load_pretrained(self._load_from)
+
+        # setup model
+        self.model, *_ = self.strategy.setup(
+            self.model, mode=Mode.VAL, cfg=self.cfg)
         if self._val_loop is None:
             raise RuntimeError(
                 '`self._val_loop` should not be None when calling val method.'
@@ -1722,9 +1790,6 @@ class Runner:
         self._val_loop = self.build_val_loop(self._val_loop)  # type: ignore
 
         self.call_hook('before_run')
-
-        # make sure checkpoint-related hooks are triggered after `before_run`
-        self.load_or_resume()
 
         metrics = self.val_loop.run()  # type: ignore
         self.call_hook('after_run')
@@ -1736,6 +1801,16 @@ class Runner:
         Returns:
             dict: A dict of metrics on testing set.
         """
+        assert isinstance(self._resume, bool)
+        if not self._resume and self._load_from is not None:
+            # When resume=False and load_from given, it means load
+            # pretrain model for train/val/test
+            self.load_pretrained(self._load_from)
+
+        # setup model
+        self.model, *_ = self.strategy.setup(
+            self.model, mode=Mode.TEST, cfg=self.cfg)
+
         if self._test_loop is None:
             raise RuntimeError(
                 '`self._test_loop` should not be None when calling test '
@@ -1745,9 +1820,6 @@ class Runner:
         self._test_loop = self.build_test_loop(self._test_loop)  # type: ignore
 
         self.call_hook('before_run')
-
-        # make sure checkpoint-related hooks are triggered after `before_run`
-        self.load_or_resume()
 
         metrics = self.test_loop.run()  # type: ignore
         self.call_hook('after_run')
@@ -1924,7 +1996,7 @@ class Runner:
             self.register_custom_hooks(custom_hooks)
 
     def resume(self,
-               filename: str,
+               filename: Optional[str] = None,
                resume_optimizer: bool = True,
                resume_param_scheduler: bool = True,
                map_location: Union[str, Callable] = 'default') -> None:
@@ -1941,12 +2013,29 @@ class Runner:
                 specifying how to remap storage locations.
                 Defaults to 'default'.
         """
+        def hook_callback(ckpt):
+            return self.call_hook('after_load_checkpoint', checkpoint=ckpt)
+
         if map_location == 'default':
-            device = get_device()
-            checkpoint = self.load_checkpoint(filename, map_location=device)
+            map_location = get_device()
+
+            if filename is None:
+                load_dir, name = self.work_dir, None
         else:
             checkpoint = self.load_checkpoint(
                 filename, map_location=map_location)
+            load_dir, name = osp.split(filename.rstrip(osp.sep))
+
+        checkpoint = self.strategy.load_checkpoint(
+            load_dir,
+            name,
+            load_optimizer=self._resume,
+            load_param_scheduler=self._resume,
+            map_location=map_location,
+            callback=hook_callback)
+
+        if checkpoint is None:
+            return
 
         self.train_loop._epoch = checkpoint['meta']['epoch']
         self.train_loop._iter = checkpoint['meta']['iter']
@@ -1998,37 +2087,13 @@ class Runner:
 
         self.message_hub.load_state_dict(checkpoint['message_hub'])
 
-        # resume optimizer
-        if 'optimizer' in checkpoint and resume_optimizer:
-            self.optim_wrapper = self.build_optim_wrapper(self.optim_wrapper)
-            self.optim_wrapper.load_state_dict(  # type: ignore
-                checkpoint['optimizer'])
 
-        # resume param scheduler
-        if resume_param_scheduler and self.param_schedulers is None:
-            self.logger.warning(
-                '`resume_param_scheduler` is True but `self.param_schedulers` '
-                'is None, so skip resuming parameter schedulers')
-            resume_param_scheduler = False
-        if 'param_schedulers' in checkpoint and resume_param_scheduler:
-            self.param_schedulers = self.build_param_scheduler(  # type: ignore
-                self.param_schedulers)  # type: ignore
-            if isinstance(self.param_schedulers, dict):
-                for name, schedulers in self.param_schedulers.items():
-                    for scheduler, ckpt_scheduler in zip(
-                            schedulers, checkpoint['param_schedulers'][name]):
-                        scheduler.load_state_dict(ckpt_scheduler)
-            else:
-                for scheduler, ckpt_scheduler in zip(
-                        self.param_schedulers,  # type: ignore
-                        checkpoint['param_schedulers']):
-                    scheduler.load_state_dict(ckpt_scheduler)
 
         self._has_loaded = True
 
         self.logger.info(f'resumed epoch: {self.epoch}, iter: {self.iter}')
 
-    def load_checkpoint(self,
+    def load_pretrained(self,
                         filename: str,
                         map_location: Union[str, Callable] = 'cpu',
                         strict: bool = False,
@@ -2053,13 +2118,9 @@ class Runner:
         # Add comments to describe the usage of `after_load_ckpt`
         self.call_hook('after_load_checkpoint', checkpoint=checkpoint)
 
-        if is_model_wrapper(self.model):
-            model = self.model.module
-        else:
-            model = self.model
 
         checkpoint = _load_checkpoint_to_model(
-            model, checkpoint, strict, revise_keys=revise_keys)
+            self.model, checkpoint, strict, revise_keys=revise_keys)
 
         self._has_loaded = True
 
@@ -2118,20 +2179,6 @@ class Runner:
         else:
             meta.update(epoch=self.epoch, iter=self.iter + 1)
 
-        if file_client_args is not None:
-            warnings.warn(
-                '"file_client_args" will be deprecated in future. '
-                'Please use "backend_args" instead', DeprecationWarning)
-            if backend_args is not None:
-                raise ValueError(
-                    '"file_client_args" and "backend_args" cannot be set at '
-                    'the same time.')
-
-            file_client = FileClient.infer_client(file_client_args, out_dir)
-            filepath = file_client.join_path(out_dir, filename)
-        else:
-            filepath = join_path(  # type: ignore
-                out_dir, filename, backend_args=backend_args)
 
         meta.update(
             cfg=self.cfg.pretty_text,
@@ -2140,51 +2187,26 @@ class Runner:
             time=time.strftime('%Y%m%d_%H%M%S', time.localtime()),
             mmengine_version=mmengine.__version__ + get_git_hash())
 
+
+        meta_checkpoint = {
+            'meta': meta,
+            'message_hub': self.message_hub.state_dict()
+        }
         if hasattr(self.train_dataloader.dataset, 'metainfo'):
             meta.update(dataset_meta=self.train_dataloader.dataset.metainfo)
 
-        if is_model_wrapper(self.model):
-            model = self.model.module
-        else:
-            model = self.model
+        def hook_callback(ckpt):
+            return self.call_hook('before_save_checkpoint', checkpoint=ckpt)
 
-        checkpoint = {
-            'meta': meta,
-            'state_dict': weights_to_cpu(get_state_dict(model)),
-            'message_hub': self.message_hub.state_dict()
-        }
-        # save optimizer state dict to checkpoint
-        if save_optimizer:
-            if isinstance(self.optim_wrapper, OptimWrapper):
-                checkpoint['optimizer'] = self.optim_wrapper.state_dict()
-            else:
-                raise TypeError(
-                    'self.optim_wrapper should be an `OptimWrapper` '
-                    'or `OptimWrapperDict` instance, but got '
-                    f'{self.optim_wrapper}')
-
-        # save param scheduler state dict
-        if save_param_scheduler and self.param_schedulers is None:
-            self.logger.warning(
-                '`save_param_scheduler` is True but `self.param_schedulers` '
-                'is None, so skip saving parameter schedulers')
-            save_param_scheduler = False
-        if save_param_scheduler:
-            if isinstance(self.param_schedulers, dict):
-                checkpoint['param_schedulers'] = dict()
-                for name, schedulers in self.param_schedulers.items():
-                    checkpoint['param_schedulers'][name] = []
-                    for scheduler in schedulers:
-                        state_dict = scheduler.state_dict()
-                        checkpoint['param_schedulers'][name].append(state_dict)
-            else:
-                checkpoint['param_schedulers'] = []
-                for scheduler in self.param_schedulers:  # type: ignore
-                    state_dict = scheduler.state_dict()  # type: ignore
-                    checkpoint['param_schedulers'].append(state_dict)
-
-        self.call_hook('before_save_checkpoint', checkpoint=checkpoint)
-        save_checkpoint(checkpoint, filepath)
+        self.strategy.save_checkpoint(
+            out_dir,
+            filename,
+            meta=meta_checkpoint,
+            save_optimizer=save_optimizer,
+            save_param_scheduler=save_param_scheduler,
+            file_client_args=file_client_args,
+            backend_args=backend_args,
+            callback=hook_callback)
 
     @master_only
     def dump_config(self) -> None:
