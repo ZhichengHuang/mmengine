@@ -97,7 +97,7 @@ class MMFullyShardedDataParallel(FullyShardedDataParallel):
         cpu_offload: Optional[Union[bool, CPUOffload]] = None,
         fsdp_auto_wrap_policy: Optional[Union[str, Callable]] = None,
         backward_prefetch: Optional[Union[str, BackwardPrefetch]] = None,
-        mixed_precision_policy: Optional[Union[str, MixedPrecision]] = None,
+        mixed_precision: Optional[Union[str, MixedPrecision]] = None,
         **kwargs,
     ):
 
@@ -143,17 +143,17 @@ class MMFullyShardedDataParallel(FullyShardedDataParallel):
                                 'or `BackwardPrefetch`, but has type '
                                 f'{type(backward_prefetch)}')
 
-        if mixed_precision_policy is not None:
-            if isinstance(mixed_precision_policy, str):
-                assert mixed_precision_policy in ['fp16', 'bf16'], \
+        if mixed_precision is not None:
+            if isinstance(mixed_precision, str):
+                assert mixed_precision in ['fp16', 'bf16'], \
                 'mixed_precision should be either `fp16` or `bf16`, ' \
-                f' but get {mixed_precision_policy}'
+                f' but get {mixed_precision}'
                 dtype = None
-                if mixed_precision_policy=="fp16":
+                if mixed_precision=="fp16":
                     dtype = torch.float16
-                elif mixed_precision_policy =="bf16":
+                elif mixed_precision =="bf16":
                     dtype = torch.bfloat16
-                mixed_precision_policy = MixedPrecision(param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype)
+                mixed_precision = MixedPrecision(param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype)
 
 
 
@@ -191,7 +191,7 @@ class MMFullyShardedDataParallel(FullyShardedDataParallel):
             auto_wrap_policy=fsdp_auto_wrap_policy,
             cpu_offload=cpu_offload,
             backward_prefetch=backward_prefetch,
-            mixed_precision_policy=mixed_precision_policy,
+            mixed_precision=mixed_precision,
             **kwargs)
 
     def train_step(self, data: dict,
