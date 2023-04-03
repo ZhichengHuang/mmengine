@@ -1715,11 +1715,7 @@ class Runner:
                 dataloader, DataLoader) else dataloader['batch_size']
             real_bs = self.world_size * bs
             self.auto_scale_lr.setdefault('real_bs', real_bs)
-
-        if isinstance(self.train_dataloader, DataLoader):
-            epoch_length = len(self.train_dataloader)
-        else:
-            epoch_length = None
+        
 
         # Strategy has no access to dataloader/loops, so put it here.
         # Refer to PR #361
@@ -1739,7 +1735,7 @@ class Runner:
             mode=Mode.TRAIN,
             cfg=self.cfg,
             max_epochs=self.max_epochs,
-            epoch_length=epoch_length,
+            epoch_length=len(self.train_dataloader),
             max_iters=self.max_iters,
             auto_scale_lr=self.auto_scale_lr)
 
