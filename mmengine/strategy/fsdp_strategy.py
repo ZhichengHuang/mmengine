@@ -46,7 +46,8 @@ class FSDPStrategy(DDPStrategy):
                      type='FullOptimStateDictConfig',
                      offload_to_cpu=True,
                      rank0_only=True),
-                 **fsdp_kwargs):
+                 fsdp_kwargs:Optional[Dict]=None,
+                 **kwargs):
         self.state_dict_type = StateDictType[state_dict_type]
         self.state_dict_config = FSDP_CONFIGS.build(state_dict_config)
         self.optim_state_dict_config = FSDP_CONFIGS.build(
@@ -57,7 +58,7 @@ class FSDPStrategy(DDPStrategy):
             amp=amp,
             accumulative_counts=accumulative_counts,
             clip_grad=clip_grad,
-            **fsdp_kwargs)
+            **kwargs)
 
     def _maybe_wrap_model(self) -> None:
         # model has been wrapped, do not re-wrap

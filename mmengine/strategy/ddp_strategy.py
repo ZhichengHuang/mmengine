@@ -30,7 +30,8 @@ class DDPStrategy(NativeStrategy):
                  accumulative_counts: int = 1,
                  clip_grad: Optional[Dict] = None,
                  detect_anomalous_params: bool = False,
-                 **ddp_kwargs):
+                 ddp_kwargs:Optional[Dict]=None,
+                 **kwargs):
         super().__init__(
             logger=logger,
             amp=amp,
