@@ -39,6 +39,8 @@ class DDPStrategy(NativeStrategy):
             clip_grad=clip_grad)
         self.detect_anomalous_params = detect_anomalous_params
         self.ddp_kwargs = ddp_kwargs
+        if self.ddp_kwargs is None:
+            self.ddp_kwargs=dict()
 
         # Compat with existing use cases, where `model_wrapper_cfg` is None
         # and `find_unused_parameters` is set in `cfg`
