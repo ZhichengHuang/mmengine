@@ -1,8 +1,9 @@
+# Copyright (c) OpenMMLab. All rights reserved.
 import logging
 import os
 import os.path as osp
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Union
+from typing import Dict, Optional, Union
 
 from torch.distributed.fsdp import FullStateDictConfig
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -26,8 +27,10 @@ FSDP_CONFIGS.register_module(module=FullStateDictConfig)
 FSDP_CONFIGS.register_module(module=ShardedStateDictConfig)
 FSDP_CONFIGS.register_module(module=LocalStateDictConfig)
 
+
 @STRATEGIES.register_module()
 class FSDPStrategy(DDPStrategy):
+
     def __init__(self,
                  *,
                  logger: logging.Logger = None,
@@ -35,16 +38,20 @@ class FSDPStrategy(DDPStrategy):
                  accumulative_counts: int = 1,
                  clip_grad: Optional[Dict] = None,
                  state_dict_type: str = 'FULL_STATE_DICT',
-                 state_dict_config: dict = dict(type='FullStateDictConfig',
-                                                offload_to_cpu=True,
-                                                rank0_only=True),
-                 optim_state_dict_config: dict = dict(type='FullOptimStateDictConfig',
-                                                      offload_to_cpu=True,
-                                                      rank0_only=True),
+                 state_dict_config: dict = dict(
+                     type='FullStateDictConfig',
+                     offload_to_cpu=True,
+                     rank0_only=True),
+                 optim_state_dict_config: dict = dict(
+                     type='FullOptimStateDictConfig',
+                     offload_to_cpu=True,
+                     rank0_only=True),
                  **fsdp_kwargs):
         self.state_dict_type = StateDictType[state_dict_type]
         self.state_dict_config = FSDP_CONFIGS.build(state_dict_config)
-        self.optim_state_dict_config = FSDP_CONFIGS.build(optim_state_dict_config)
+        self.optim_state_dict_config = FSDP_CONFIGS.build(
+            optim_state_dict_config)
+        self.fsdp_kwargs = fsdp_kwargs
         super(DDPStrategy, self).__init__(
             logger=logger,
             amp=amp,
@@ -53,50 +60,50 @@ class FSDPStrategy(DDPStrategy):
             **fsdp_kwargs)
 
     def _maybe_wrap_model(self) -> None:
+        # model has been wrapped, do not re-wrap
         if is_model_wrapper(self.model):
             return
 
         assert self.model is not None, (
             'Model should have been built before wrap')
 
+        self.fsdp_kwargs.setdefault('type', 'MMFullyShardedDataParallel')
+        self.fsdp_kwargs.setdefault('module', self.model)
         model_wrapper_cfg: dict = self.cfg.get('model_wrapper_cfg', dict())
-        wrapper_args = deepcopy(model_wrapper_cfg)
-        # use `type` declared by user; otherwise use DDPStrategy's default
-        wrapper_type = wrapper_args.pop('type', 'MMFullyShardedDataParallel')
-        wrapper_cls = MODEL_WRAPPERS.get(wrapper_type)
-        self.model = wrapper_cls(
-            module=self.model,
-            **wrapper_args)
-        self.model.set_state_dict_type(
-            self.model,
-            self.state_dict_type,
-            self.state_dict_config,
-            self.optim_state_dict_config)
+        if self.fsdp_kwargs:
+            assert not model_wrapper_cfg, (
+                'fsdp_kwargs and model_wrapper_cfg cannot be configured at the same time'
+            )
+        else:
+            self.fsdp_kwargs.update(model_wrapper_cfg)
+        self.model = MODEL_WRAPPERS.build(self.fsdp_kwargs)
+        self.model.set_state_dict_type(self.model, self.state_dict_type,
+                                       self.state_dict_config,
+                                       self.optim_state_dict_config)
 
     def _is_full_state_dict(self):
         return self.state_dict_type == StateDictType.FULL_STATE_DICT
 
-    def save_checkpoint(self,out_dir: str, name: str, *args, **kwargs):
+    def save_checkpoint(self, out_dir: str, name: str, *args, **kwargs):
         # In non-FULL_STATE_DICT model, FSDPStrategy will save checkpoint
-        # of different ranks in different files
+        # of different ranks in different files.
         if not self._is_full_state_dict():
             rank = get_rank()
             out_dir = osp.join(out_dir, name)
             mkdir_or_exist(out_dir)
             name = f'rank{rank}.pth'
-        return super(DDPStrategy,self).save_checkpoint(out_dir,
-                                                       name, *args, **kwargs)
+        return super(DDPStrategy,
+                     self).save_checkpoint(out_dir, name, *args, **kwargs)
 
     def _get_state_dict(self):
         # We've set state_dict by `FSDP.set_state_dict_type`, therefore we
-        # can get state_dict by `FSDP.get_state_dict`
+        # should get model state dict by `FSDO.state_dict`
         return self.model.state_dict()
 
     def _get_optim_state_dict(self):
         if self._is_full_state_dict():
             # Same as `_get_state_dict`
-            return FSDP.optim_state_dict(
-                self.model, self.optim)
+            return FSDP.optim_state_dict(self.model, self.optim)
         else:
             return self.optim.state_dict()
 
@@ -125,7 +132,6 @@ class FSDPStrategy(DDPStrategy):
             filepath = osp.join(filepath, f'rank{rank}.pth')
             return _load_checkpoint(filepath, map_location, logger)
 
-
     def _load_checkpoint_to_model(self, checkpoint, strict):
         # We should load state dict by `FSDP.load_state_dict`
         state_dict = checkpoint['state_dict']
@@ -139,9 +145,3 @@ class FSDPStrategy(DDPStrategy):
             super()._resume_optim_wrapper(optim_state_dict)
         else:
             super()._resume_optim_wrapper(optim_state_dict)
-
-
-
-
-
-
