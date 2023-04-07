@@ -180,7 +180,7 @@ class MMFullyShardedDataParallel(FullyShardedDataParallel):
                 dtype=torch.float16
             else:
                 dtype=torch.bfloat16
-            mixed_precision = MixedPrecision(aram_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype)
+            mixed_precision = MixedPrecision(param_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype)
 
         elif mixed_precision is not None:
             raise TypeError(
