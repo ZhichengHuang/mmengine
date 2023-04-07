@@ -110,7 +110,7 @@ class MMFullyShardedDataParallel(FullyShardedDataParallel):
         cpu_offload: Optional[Union[bool, CPUOffload]] = None,
         fsdp_auto_wrap_policy: Optional[Union[str, Callable]] = None,
         backward_prefetch: Optional[Union[str, BackwardPrefetch]] = None,
-        mixed_precision: Optional[Union[dict, MixedPrecision]] = None,
+        mixed_precision: Optional[Union[str, dict, MixedPrecision]] = None,
         ignored_modules: Optional[Union[Iterable[str],
                                         Iterable[nn.Module]]] = None,
         # TODO: use FUNCTIONS registry
@@ -174,6 +174,14 @@ class MMFullyShardedDataParallel(FullyShardedDataParallel):
             mixed_precision = MixedPrecision(**mixed_precision)
         elif isinstance(mixed_precision, MixedPrecision):
             mixed_precision = mixed_precision
+        elif isinstance(mixed_precision,str) and mixed_precision in ['fp16','bf16']:
+            dtype=None
+            if mixed_precision=="fp16":
+                dtype=torch.float16
+            else:
+                dtype=torch.bfloat16
+            mixed_precision = MixedPrecision(aram_dtype=dtype, reduce_dtype=dtype, buffer_dtype=dtype)
+
         elif mixed_precision is not None:
             raise TypeError(
                 '`mixed_precision` should be `None`, `dict` or '
