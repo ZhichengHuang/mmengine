@@ -3,8 +3,9 @@ import logging
 import os
 import os.path as osp
 from copy import deepcopy
-from typing import Dict, Optional, Union
+from typing import Any, Dict, Optional, Union
 
+import torch.cuda
 from torch.distributed.fsdp import FullStateDictConfig
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp import (LocalStateDictConfig,
@@ -13,10 +14,12 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import (
     FullOptimStateDictConfig, LocalOptimStateDictConfig,
     ShardedOptimStateDictConfig)
 
+from mmengine.device import get_device
 from mmengine.dist import get_rank, is_main_process
-from mmengine.model import is_model_wrapper
+from mmengine.model import convert_sync_batchnorm, is_model_wrapper
 from mmengine.registry import MODEL_WRAPPERS, STRATEGIES, Registry
 from mmengine.utils import mkdir_or_exist
+from .strategy import Mode
 from .ddp_strategy import DDPStrategy
 
 FSDP_CONFIGS = Registry('fsdp configs')
@@ -59,6 +62,65 @@ class FSDPStrategy(DDPStrategy):
             accumulative_counts=accumulative_counts,
             clip_grad=clip_grad,
             **kwargs)
+
+    def setup(
+            self,
+            model: Any,
+            optim: Any = None,
+            scheduler: Any = None,
+            *,
+            mode: Mode = Mode.TRAIN,
+            cfg: Any = None,
+            # below are for backward compatibility
+            max_epochs: Optional[int] = None,
+            epoch_length: Optional[int] = None,
+            max_iters: Optional[int] = None,
+            auto_scale_lr: Optional[Dict] = None):
+        # Only build when necessaray
+        if self.mode >= mode:
+            self.logger.debug(
+                'Trying to setup for {mode.name}, but {self.model.name} has '
+                'been setup. Skip setup process.')
+            return self.model, self.optim, self.scheduler
+        self.mode = mode
+
+        self.max_epochs = max_epochs
+        self.epoch_length = epoch_length
+        self.max_iters = max_iters
+        self.auto_scale_lr = auto_scale_lr
+
+        self._store_config_or_instance(model, optim, scheduler, cfg=cfg)
+        assert self.model is not None or self.model_cfg is not None, (
+            'Model instance or config must be provided to Strategy, got '
+            f'{model}')
+
+        self._maybe_build_model()
+
+        # self.model = self.model.to(get_device())
+        # DDP should use sync_bn if specified. Currently read from `cfg`
+        # for backward compatibility
+        sync_bn = self.cfg.get('sync_bn', None)
+        if sync_bn is not None:
+            try:
+                self.model = convert_sync_batchnorm(self.model, sync_bn)
+            except ValueError as e:
+                self.logger.error(
+                    'cfg.sync_bn should be "torch" or "mmcv", but got'
+                    f'{sync_bn}')
+                raise e
+
+        # TODO: Change ApexOptimWrapper logic to build it before wrap
+        self._maybe_wrap_model()
+
+        # Only build optimizer and param_schedulers in training
+        if self.mode == Mode.TRAIN:
+            self._maybe_build_optim()
+            # Since auto_scale_lr must be called after building optim_wrapper
+            # and before building param_schedulers, this must be called here
+            self._maybe_scale_lr()
+            self._maybe_build_scheduler()
+
+        return self.model, self.optim, self.schedulers
 
     def _maybe_wrap_model(self) -> None:
         # model has been wrapped, do not re-wrap

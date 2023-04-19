@@ -8,6 +8,7 @@ from torch.distributed.fsdp.fully_sharded_data_parallel import (
     BackwardPrefetch, CPUOffload, FullyShardedDataParallel, MixedPrecision)
 
 from mmengine.optim import OptimWrapper
+from mmengine.dist import get_rank
 from mmengine.registry import MODEL_WRAPPERS, Registry
 from mmengine.structures import BaseDataElement
 from mmengine.utils import is_seq_of
@@ -215,11 +216,14 @@ class MMFullyShardedDataParallel(FullyShardedDataParallel):
         # We make sure these params are untrained by some tricky methods
         for m in self._fixed_modules:
             m.requires_grad_(True)
+
+        gpu_id = get_rank() % torch.cuda.device_count()
         super().__init__(
             module=module,
             process_group=process_group,
             auto_wrap_policy=fsdp_auto_wrap_policy,
             cpu_offload=cpu_offload,
+            device_id=gpu_id,
             backward_prefetch=backward_prefetch,
             mixed_precision=mixed_precision,
             ignored_modules=ignored_modules,
