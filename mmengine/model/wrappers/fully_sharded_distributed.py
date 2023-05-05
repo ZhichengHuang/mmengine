@@ -214,8 +214,8 @@ class MMFullyShardedDataParallel(FullyShardedDataParallel):
         # Set `requires_grad=True` to avoid FSDP AssertionError.
         # See https://github.com/pytorch/pytorch/issues/75943
         # We make sure these params are untrained by some tricky methods
-        for m in self._fixed_modules:
-            m.requires_grad_(True)
+        # for m in self._fixed_modules:
+        #     m.requires_grad_(True)
 
         gpu_id = get_rank() % torch.cuda.device_count()
         super().__init__(
@@ -266,9 +266,9 @@ class MMFullyShardedDataParallel(FullyShardedDataParallel):
 
         # manually zero_grad fixed parameters,
         # since they are not in any optimizer
-        if optim_wrapper.should_update():
-            for m in self._fixed_modules:
-                m.zero_grad(set_to_none=True)
+        # if optim_wrapper.should_update():
+        #     for m in self._fixed_modules:
+        #         m.zero_grad(set_to_none=True)
         return log_vars
 
     def val_step(self, data: dict) -> List[BaseDataElement]:
