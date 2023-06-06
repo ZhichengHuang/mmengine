@@ -1740,7 +1740,7 @@ class Runner:
             auto_scale_lr=self.auto_scale_lr)
 
         if self._resume:
-            self.resume(self._load_from)
+            self.resume(self._load_from,map_location='cpu')
 
         if self._val_loop is not None:
             self._val_loop = self.build_val_loop(
@@ -2018,8 +2018,8 @@ class Runner:
             if filename is None:
                 load_dir, name = self.work_dir, None
         else:
-            checkpoint = self.load_checkpoint(
-                filename, map_location=map_location)
+            # checkpoint = self.load_checkpoint(
+            #     filename, map_location=map_location)
             load_dir, name = osp.split(filename.rstrip(osp.sep))
 
         checkpoint = self.strategy.load_checkpoint(
