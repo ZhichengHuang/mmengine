@@ -2015,8 +2015,8 @@ class Runner:
         if map_location == 'default':
             map_location = get_device()
 
-            if filename is None:
-                load_dir, name = self.work_dir, None
+        if filename is None:
+            load_dir, name = self.work_dir, None
         else:
             # checkpoint = self.load_checkpoint(
             #     filename, map_location=map_location)
