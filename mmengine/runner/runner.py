@@ -1740,7 +1740,7 @@ class Runner:
             auto_scale_lr=self.auto_scale_lr)
 
         if self._resume:
-            self.resume(self._load_from)
+            self.resume(self._load_from,map_location="cpu")
 
         if self._val_loop is not None:
             self._val_loop = self.build_val_loop(
