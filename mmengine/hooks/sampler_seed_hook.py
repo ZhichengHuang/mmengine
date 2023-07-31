@@ -27,7 +27,7 @@ class DistSamplerSeedHook(Hook):
             runner.train_loop.dataloader.sampler.set_epoch(runner.epoch)
 
         elif hasattr(runner.train_loop.dataloader,
-                     'batch_sampler') and hasattr(
+                     'batch_sampler') and runner.train_loop.dataloader.batch_sampler is not None and hasattr(
                          runner.train_loop.dataloader.batch_sampler.sampler,
                          'set_epoch'):
             # In case the` _SingleProcessDataLoaderIter` has no batch sampler.
