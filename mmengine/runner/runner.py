@@ -8,6 +8,7 @@ import platform
 import time
 import warnings
 from collections import OrderedDict
+from copy import deepcopy
 from functools import partial
 from typing import Callable, Dict, List, Optional, Sequence, Union
 
@@ -422,6 +423,8 @@ class Runner:
         if isinstance(model, dict) and data_preprocessor is not None:
             # Merge the data_preprocessor to model config.
             model.setdefault('data_preprocessor', data_preprocessor)
+
+        self._src_model_cfg = deepcopy(model)
         self.model = self.build_model(model)
 
         self._model_name = self.model.__class__.__name__
